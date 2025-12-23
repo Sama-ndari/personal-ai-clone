@@ -16,7 +16,7 @@ It features a **Tool-Calling Loop** that allows the AI to:
 ```mermaid
 graph TD
     User[User Question] --> Chat[Gradio Interface]
-    Chat --> Agent{AI Agent (GPT-4o)}
+    Chat --> Agent{"AI Agent (GPT-4o)"}
     
     subgraph Knowledge Base
     Agent -- Retrieve Context --> PDF[Resume.pdf]
