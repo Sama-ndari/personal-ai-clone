@@ -117,6 +117,6 @@ This project is ready to deploy on Hugging Face for free.
 
 ---
 
-*Created by [Samandari*](https://github.com/Sama-ndari)
+Created by [Samandari](https://github.com/Sama-ndari)
 
 
