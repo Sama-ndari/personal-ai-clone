@@ -5,42 +5,41 @@ from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from openai import OpenAI
 from pypdf import PdfReader
+from docx import Document  # Required for reading the Brain
 import gradio as gr
 
-# Load environment variables from .env file
+# Load environment variables
 load_dotenv(override=True)
 
-# --- Tool Implementations ---
+# --- Global Configurations ---
+PUSHOVER_USER = os.getenv("PUSHOVER_USER")
+PUSHOVER_TOKEN = os.getenv("PUSHOVER_TOKEN")
+PUSHOVER_URL = "https://api.pushover.net/1/messages.json"
+
+# --- Tool Functions ---
 
 def push(message):
     """Sends a push notification via Pushover."""
-    pushover_user = os.getenv("PUSHOVER_USER")
-    pushover_token = os.getenv("PUSHOVER_TOKEN")
-    if not pushover_user or not pushover_token:
-        print("Pushover credentials not set. Skipping notification.")
+    if not PUSHOVER_USER or not PUSHOVER_TOKEN:
+        print(f"Pushover not configured. Mock sending: {message}")
         return
-    print(f"Sending push notification: {message}")
     try:
         requests.post(
-            "https://api.pushover.net/1/messages.json",
-            data={
-                "user": pushover_user,
-                "token": pushover_token,
-                "message": message
-            }
+            PUSHOVER_URL,
+            data={"user": PUSHOVER_USER, "token": PUSHOVER_TOKEN, "message": message}
         )
     except requests.RequestException as e:
         print(f"Failed to send push notification: {e}")
 
 def record_user_details(email, name="Not provided", notes="Not provided"):
     """Records user details and sends a notification."""
-    push(f"New contact inquiry from {name} ({email}). Notes: {notes}")
-    return {"status": "Details recorded successfully."}
+    push(f"CONTACT: {name} ({email}) - Notes: {notes}")
+    return {"status": "Details recorded successfully. I will get back to you."}
 
 def record_unknown_question(question):
     """Records a question the chatbot could not answer."""
-    push(f"An unanswerable question was asked: '{question}'")
-    return {"status": "Question recorded."}
+    push(f"UNKNOWN QUESTION: '{question}'")
+    return {"status": "Question logged for review."}
 
 # --- Tool Definitions (JSON Schema) ---
 
@@ -53,9 +52,9 @@ tools = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "email": {"type": "string", "description": "The user's email address."},
-                    "name": {"type": "string", "description": "The user's name."},
-                    "notes": {"type": "string", "description": "Contextual notes from the conversation."}
+                    "email": {"type": "string"},
+                    "name": {"type": "string"},
+                    "notes": {"type": "string"}
                 },
                 "required": ["email"]
             }
@@ -65,11 +64,11 @@ tools = [
         "type": "function",
         "function": {
             "name": "record_unknown_question",
-            "description": "Use this tool to record a question that could not be answered from the provided context.",
+            "description": "Log a question you cannot answer from context.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "question": {"type": "string", "description": "The exact question that could not be answered."}
+                    "question": {"type": "string"}
                 },
                 "required": ["question"]
             }
@@ -83,13 +82,19 @@ class PersonalAI:
     def __init__(self):
         self.openai_client = OpenAI()
         self.name = "Jules Cesar Junior NDAYISENGA"
-
         self.knowledge_dir = "me/"
-        # Create the directory if it doesn't exist
+        
+        # Initialize Knowledge Base
         if not os.path.exists(self.knowledge_dir):
             os.makedirs(self.knowledge_dir)
-            print(f"Created directory: {self.knowledge_dir}")
+            print(f"Created directory: {self.knowledge_dir}. Please add files.")
+            
         self.knowledge_context = self._load_knowledge_base(self.knowledge_dir)
+        
+        # Debugging check
+        print(f"DEBUG: Context Length is: {len(self.knowledge_context)} characters")
+        if len(self.knowledge_context) < 100:
+            print("WARNING: The AI brain is empty! Check your 'me/' folder.")
 
         self.system_prompt = self._construct_system_prompt()
 
@@ -106,13 +111,14 @@ class PersonalAI:
             return ''
 
     def _load_knowledge_base(self, directory):
-        print("Loading knowledge base...")
         full_context = []
         url_list_file = os.path.join(directory, "links.txt")
 
         for filename in os.listdir(directory):
+            path = os.path.join(directory, filename)
+            
+            # Handle PDF
             if filename.endswith('.pdf'):
-                path = os.path.join(directory, filename)
                 try:
                     reader = PdfReader(path)
                     pdf_text = ''.join(page.extract_text() or '' for page in reader.pages)
@@ -120,7 +126,18 @@ class PersonalAI:
                     print(f'Loaded PDF: {filename}')
                 except Exception as e:
                     print(f'Error reading {filename}: {e}')
+            
+            # Handle DOCX (The Brain)
+            elif filename.endswith('.docx'):
+                try:
+                    doc = Document(path)
+                    text = '\n'.join([para.text for para in doc.paragraphs])
+                    full_context.append(f'--- Content from {filename} ---\n{text}')
+                    print(f'Loaded DOCX: {filename}')
+                except Exception as e:
+                    print(f'Error reading DOCX {filename}: {e}')
 
+        # Handle URL Scraping
         if os.path.exists(url_list_file):
             with open(url_list_file, 'r') as f:
                 for url in (line.strip() for line in f if line.strip()):
@@ -128,11 +145,24 @@ class PersonalAI:
                     if (scraped_text := self._scrape_text_from_url(url)):
                         full_context.append(f'--- Content from {url} ---\n{scraped_text}')
         
-        print("--- Knowledge Base loading complete. ---")
         return '\n\n'.join(full_context)
 
     def _construct_system_prompt(self):
-        return f"""You are a helpful AI assistant acting as {self.name}, representing him on his personal website. Your persona is professional, confident, and thoughtful.\n\nYour primary goal is to answer questions about {self.name}'s career, background, and skills using the provided context. Speak in the first person ('I').\n\n**Rules & Capabilities:**\n1.  **Grounded Answers:** Base your answers strictly on the context provided below. Do not invent information.\n2.  **Tool for Unknown Questions:** If you cannot answer a question from the context, you MUST use the `record_unknown_question` tool. Then, inform the user that you don't have the information.\n3.  **Tool for Contact:** If the user expresses interest in getting in touch, ask for their email, name, and any relevant notes, then use the `record_user_details` tool to capture this information.\n4.  **Polite Refusal:** Do not answer questions that are unrelated to {self.name}'s professional life. Politely decline and steer the conversation back to professional topics.\n\n--- CONTEXT ---\n{self.knowledge_context}\n--- END CONTEXT ---"""
+        return f"""You are a helpful AI assistant acting as {self.name}, representing him on his personal website. 
+Your persona is professional, confident, and thoughtful.
+
+Your primary goal is to answer questions about {self.name}'s career, background, and skills using the provided context. 
+Speak in the first person ('I').
+
+**Rules & Capabilities:**
+1.  **Grounded Answers:** Base your answers strictly on the context provided below. Do not invent information.
+2.  **Tool for Unknown Questions:** If you cannot answer a question from the context, you MUST use the `record_unknown_question` tool. Then, inform the user that you don't have the information.
+3.  **Tool for Contact:** If the user expresses interest in getting in touch, ask for their email, name, and any relevant notes, then use the `record_user_details` tool to capture this information.
+4.  **Persona & Boundaries:** You are an 'Ambivert'—professional but human. You CAN answer personal questions about hobbies (Music, Gaming), favorites (Chocolate, Hugs), and faith if they are in your context. Only refuse questions that are intrusive or unsafe.
+
+--- CONTEXT ---
+{self.knowledge_context}
+--- END CONTEXT ---"""
 
     def _handle_tool_calls(self, tool_calls):
         tool_outputs = []
@@ -168,6 +198,7 @@ class PersonalAI:
             {"role": "user", "content": message}
         ]
 
+        # Loop to handle recursive tool calls
         while True:
             response = self.openai_client.chat.completions.create(
                 model="gpt-4o-mini",
@@ -181,18 +212,30 @@ class PersonalAI:
             if not tool_calls:
                 return response_message.content
             
-            tool_outputs = self._handle_tool_calls(tool_calls)
+            # Add tool call to history so the model knows it asked for it
             messages.append(response_message)
+            
+            tool_outputs = self._handle_tool_calls(tool_calls)
             messages.extend(tool_outputs)
 
 # --- Gradio Interface Launch ---
 
 if __name__ == "__main__":
     ai_instance = PersonalAI()
+    
     gradio_interface = gr.ChatInterface(
         ai_instance.chat,
-        title="Personal AI Clone with Tools",
-        description="Ask me about my professional background or ask to get in touch.",
-        examples=["What is your experience with AI?", "I'd like to discuss a project with you, can I leave my email?"]
+        title="Chat with Samandari (AI Clone) 🇧🇮💻",
+        description="""I am a Software Engineer, Founder of Ijwi ry'Ikirundi AI, 
+        and a former Nursing student. Ask me about my tech stack, 
+        my unique background, or just say hi! (I love chocolate, code, and helping people).""",
+        examples=[
+            "What is Ijwi ry'Ikirundi AI?", 
+            "How does your nursing background help you code?", 
+            "What do you do to relax?", 
+            "I want to collaborate on a project."
+        ],
+        theme="soft"
     )
+    # Using 0.0.0.0 allows it to be accessed on the local network
     gradio_interface.launch(server_name="0.0.0.0", share=False)
